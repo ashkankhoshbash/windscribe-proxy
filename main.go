@@ -135,144 +135,153 @@ func run() int {
 
 	mainLogger.Info("windscribe-proxy client version %s is starting...", version)
 
-	var dialer ContextDialer = &net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
-	}
-
-	var caPool *x509.CertPool
-	if args.caFile != "" {
-		caPool = x509.NewCertPool()
-		certs, err := ioutil.ReadFile(args.caFile)
-		if err != nil {
-			mainLogger.Error("Can't load CA file: %v", err)
-			return 15
+	var dialerClients []DialerClientPair
+	for i := 0; i < 5; i++ {
+		var dialer ContextDialer = &net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
 		}
-		if ok := caPool.AppendCertsFromPEM(certs); !ok {
-			mainLogger.Error("Can't load certificates from CA file")
-			return 15
-		}
-	}
 
-	if args.proxy != "" {
-		xproxy.RegisterDialerType("http", proxyFromURLWrapper)
-		xproxy.RegisterDialerType("https", proxyFromURLWrapper)
-		proxyURL, err := url.Parse(args.proxy)
-		if err != nil {
-			mainLogger.Critical("Unable to parse base proxy URL: %v", err)
-			return 6
-		}
-		pxDialer, err := xproxy.FromURL(proxyURL, dialer)
-		if err != nil {
-			mainLogger.Critical("Unable to instantiate base proxy dialer: %v", err)
-			return 7
-		}
-		dialer = pxDialer.(ContextDialer)
-	}
-
-	if args.resolver != "" {
-		dialer, err = NewResolvingDialer(args.resolver, args.timeout, dialer, resolverLogger)
-		if err != nil {
-			mainLogger.Critical("Unable to instantiate resolver: %v", err)
-			return 5
-		}
-	}
-
-	wndclientDialer := dialer
-
-	wndc, err := wndclient.NewWndClient(&http.Transport{
-		DialContext:           wndclientDialer.DialContext,
-		DialTLSContext:        NewFakeSNIDialer(caPool, args.fakeSNI, wndclientDialer).DialTLSContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-	})
-	if err != nil {
-		mainLogger.Critical("Unable to construct WndClient: %v", err)
-		return 8
-	}
-	wndc.State.Settings.ClientAuthSecret = args.clientAuthSecret
-
-	try := retryPolicy(args.initRetries, args.initRetryInterval, mainLogger)
-
-	// Try to resurrect state
-	state, err := maybeLoadState(args.forceColdInit, args.stateFile)
-	if err != nil {
-		switch err {
-		case errColdInitForced:
-			mainLogger.Info("Cold init forced.")
-		default:
-			mainLogger.Warning("Failed to load client state: %v. It is OK for a first run. Performing cold init...", err)
-		}
-		err = coldInit(wndc, try, args.username, args.password, args.tfacode, args.timeout)
-		if err != nil {
-			mainLogger.Critical("Cold init failed: %v", err)
-			return 9
-		}
-		err = saveState(args.stateFile, &wndc.State)
-		if err != nil {
-			mainLogger.Error("Unable to save state file! Error: %v", err)
-		}
-	} else {
-		wndc.State = *state
-	}
-
-	var serverList wndclient.ServerList
-	if args.listProxies || args.listLocations || args.location != "" {
-		err := try("retrieve server list", func() error {
-			ctx, cl := context.WithTimeout(context.Background(), args.timeout)
-			defer cl()
-			l, err := wndc.ServerList(ctx)
-			serverList = l
-			return err
-		})
-		if err != nil {
-			return 12
-		}
-	}
-
-	if args.listProxies {
-		username, password := wndc.GetProxyCredentials()
-		return printProxies(username, password, serverList)
-	}
-
-	if args.listLocations {
-		return printLocations(serverList)
-	}
-
-	var proxyHostname string
-	if args.location == "" {
-		err := try("find best location", func() error {
-			ctx, cl := context.WithTimeout(context.Background(), args.timeout)
-			defer cl()
-			bestLocation, err := wndc.BestLocation(ctx)
-			if err == nil {
-				proxyHostname = bestLocation.Hostname
+		var caPool *x509.CertPool
+		if args.caFile != "" {
+			caPool = x509.NewCertPool()
+			certs, err := ioutil.ReadFile(args.caFile)
+			if err != nil {
+				mainLogger.Error("Can't load CA file: %v", err)
+				return 15
 			}
-			return err
+			if ok := caPool.AppendCertsFromPEM(certs); !ok {
+				mainLogger.Error("Can't load certificates from CA file")
+				return 15
+			}
+		}
+
+		if args.proxy != "" {
+			xproxy.RegisterDialerType("http", proxyFromURLWrapper)
+			xproxy.RegisterDialerType("https", proxyFromURLWrapper)
+			proxyURL, err := url.Parse(args.proxy)
+			if err != nil {
+				mainLogger.Critical("Unable to parse base proxy URL: %v", err)
+				return 6
+			}
+			pxDialer, err := xproxy.FromURL(proxyURL, dialer)
+			if err != nil {
+				mainLogger.Critical("Unable to instantiate base proxy dialer: %v", err)
+				return 7
+			}
+			dialer = pxDialer.(ContextDialer)
+		}
+
+		if args.resolver != "" {
+			dialer, err = NewResolvingDialer(args.resolver, args.timeout, dialer, resolverLogger)
+			if err != nil {
+				mainLogger.Critical("Unable to instantiate resolver: %v", err)
+				return 5
+			}
+		}
+
+		wndclientDialer := dialer
+
+		wndc, err := wndclient.NewWndClient(&http.Transport{
+			DialContext:           wndclientDialer.DialContext,
+			DialTLSContext:        NewFakeSNIDialer(caPool, args.fakeSNI, wndclientDialer).DialTLSContext,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
 		})
 		if err != nil {
-			return 13
+			mainLogger.Critical("Unable to construct WndClient: %v", err)
+			return 8
 		}
-	} else {
-		proxyHostname = pickServer(serverList, args.location)
-		if proxyHostname == "" {
-			mainLogger.Critical("Server for location \"%s\" not found.", args.location)
-			return 13
+		wndc.State.Settings.ClientAuthSecret = args.clientAuthSecret
+
+		try := retryPolicy(args.initRetries, args.initRetryInterval, mainLogger)
+
+		// Try to resurrect state
+		state, err := maybeLoadState(args.forceColdInit, args.stateFile)
+		if err != nil {
+			switch err {
+			case errColdInitForced:
+				mainLogger.Info("Cold init forced.")
+			default:
+				mainLogger.Warning("Failed to load client state: %v. It is OK for a first run. Performing cold init...", err)
+			}
+			err = coldInit(wndc, try, args.username, args.password, args.tfacode, args.timeout)
+			if err != nil {
+				mainLogger.Critical("Cold init failed: %v", err)
+				return 9
+			}
+			err = saveState(args.stateFile, &wndc.State)
+			if err != nil {
+				mainLogger.Error("Unable to save state file! Error: %v", err)
+			}
+		} else {
+			wndc.State = *state
 		}
+
+		var serverList wndclient.ServerList
+		if args.listProxies || args.listLocations || args.location != "" {
+			err := try("retrieve server list", func() error {
+				ctx, cl := context.WithTimeout(context.Background(), args.timeout)
+				defer cl()
+				l, err := wndc.ServerList(ctx)
+				serverList = l
+				return err
+			})
+			if err != nil {
+				return 12
+			}
+		}
+
+		if args.listProxies {
+			username, password := wndc.GetProxyCredentials()
+			return printProxies(username, password, serverList)
+		}
+
+		if args.listLocations {
+			return printLocations(serverList)
+		}
+
+		var proxyHostname string
+		if args.location == "" {
+			err := try("find best location", func() error {
+				ctx, cl := context.WithTimeout(context.Background(), args.timeout)
+				defer cl()
+				bestLocation, err := wndc.BestLocation(ctx)
+				if err == nil {
+					proxyHostname = bestLocation.Hostname
+				}
+				return err
+			})
+			if err != nil {
+				return 13
+			}
+		} else {
+			proxyHostname = pickServer(serverList, args.location)
+			if proxyHostname == "" {
+				mainLogger.Critical("Server for location \"%s\" not found.", args.location)
+				return 13
+			}
+		}
+
+		auth := func() string {
+			return basic_auth_header(wndc.GetProxyCredentials())
+		}
+
+		proxyNetAddr := net.JoinHostPort(proxyHostname, strconv.FormatUint(uint64(ASSUMED_PROXY_PORT), 10))
+		handlerDialer := NewProxyDialer(proxyNetAddr, proxyHostname, args.fakeSNI, auth, caPool, dialer)
+
+		dialerClients = append(dialerClients, DialerClientPair{
+			Dialer:    handlerDialer,
+			WndClient: wndc,
+		})
+		mainLogger.Info("Endpoint: %s", proxyNetAddr)
+		mainLogger.Info("Starting proxy server...")
 	}
 
-	auth := func() string {
-		return basic_auth_header(wndc.GetProxyCredentials())
-	}
-
-	proxyNetAddr := net.JoinHostPort(proxyHostname, strconv.FormatUint(uint64(ASSUMED_PROXY_PORT), 10))
-	handlerDialer := NewProxyDialer(proxyNetAddr, proxyHostname, args.fakeSNI, auth, caPool, dialer)
-	mainLogger.Info("Endpoint: %s", proxyNetAddr)
-	mainLogger.Info("Starting proxy server...")
-	handler := NewProxyHandler(handlerDialer, proxyLogger)
+	handler := NewProxyHandler(dialerClients, proxyLogger)
 	mainLogger.Info("Init complete.")
 	err = http.ListenAndServe(args.bindAddress, handler)
 	mainLogger.Critical("Server terminated with a reason: %v", err)
