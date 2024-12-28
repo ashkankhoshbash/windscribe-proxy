@@ -2,39 +2,45 @@ package main
 
 import (
 	"fmt"
+	"github.com/Snawoot/windscribe-proxy/wndclient"
+	"math/rand"
 	"net/http"
 	"strings"
-	"time"
+	"sync"
 )
 
 const BAD_REQ_MSG = "Bad Request\n"
 
 type AuthProvider func() string
 
-type ProxyHandler struct {
-	logger        *CondLogger
-	dialer        ContextDialer
-	httptransport http.RoundTripper
+type DialerClientPair struct {
+	Dialer    ContextDialer
+	WndClient *wndclient.WndClient
 }
 
-func NewProxyHandler(dialer ContextDialer, logger *CondLogger) *ProxyHandler {
-	httptransport := &http.Transport{
-		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-		DialContext:           dialer.DialContext,
-	}
+type ProxyHandler struct {
+	logger        *CondLogger
+	dialerClients []DialerClientPair
+	httpTransport http.RoundTripper
+	mu            sync.Mutex
+}
+
+func NewProxyHandler(dialerClients []DialerClientPair, logger *CondLogger) *ProxyHandler {
 	return &ProxyHandler{
 		logger:        logger,
-		dialer:        dialer,
-		httptransport: httptransport,
+		dialerClients: dialerClients,
 	}
+}
+
+func (s *ProxyHandler) getRandomDialerClient() DialerClientPair {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.dialerClients[rand.Intn(len(s.dialerClients))]
 }
 
 func (s *ProxyHandler) HandleTunnel(wr http.ResponseWriter, req *http.Request) {
-	ctx := req.Context()
-	conn, err := s.dialer.DialContext(ctx, "tcp", req.RequestURI)
+	clientPair := s.getRandomDialerClient()
+	conn, err := clientPair.Dialer.DialContext(req.Context(), "tcp", req.RequestURI)
 	if err != nil {
 		s.logger.Error("Can't satisfy CONNECT request: %v", err)
 		http.Error(wr, "Can't satisfy CONNECT request", http.StatusBadGateway)
@@ -68,12 +74,19 @@ func (s *ProxyHandler) HandleTunnel(wr http.ResponseWriter, req *http.Request) {
 }
 
 func (s *ProxyHandler) HandleRequest(wr http.ResponseWriter, req *http.Request) {
+	clientPair := s.getRandomDialerClient()
+	httpTransport := &http.Transport{
+		DialContext: clientPair.Dialer.DialContext,
+	}
+
+	// Prepare the request
 	req.RequestURI = ""
 	if req.ProtoMajor == 2 {
-		req.URL.Scheme = "http" // We can't access :scheme pseudo-header, so assume http
+		req.URL.Scheme = "http"
 		req.URL.Host = req.Host
 	}
-	resp, err := s.httptransport.RoundTrip(req)
+
+	resp, err := httpTransport.RoundTrip(req)
 	if err != nil {
 		s.logger.Error("HTTP fetch error: %v", err)
 		http.Error(wr, "Server Error", http.StatusInternalServerError)
