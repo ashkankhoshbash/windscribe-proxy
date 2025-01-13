@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"fmt"
 	"github.com/Snawoot/windscribe-proxy/wndclient"
 	"math/rand"
@@ -16,6 +17,8 @@ type AuthProvider func() string
 type DialerClientPair struct {
 	Dialer    ContextDialer
 	WndClient *wndclient.WndClient
+	Username  string
+	Password  string
 }
 
 type ProxyHandler struct {
@@ -38,8 +41,7 @@ func (s *ProxyHandler) getRandomDialerClient() DialerClientPair {
 	return s.dialerClients[rand.Intn(len(s.dialerClients))]
 }
 
-func (s *ProxyHandler) HandleTunnel(wr http.ResponseWriter, req *http.Request) {
-	clientPair := s.getRandomDialerClient()
+func (s *ProxyHandler) HandleTunnel(wr http.ResponseWriter, req *http.Request, clientPair DialerClientPair) {
 	conn, err := clientPair.Dialer.DialContext(req.Context(), "tcp", req.RequestURI)
 	if err != nil {
 		s.logger.Error("Can't satisfy CONNECT request: %v", err)
@@ -73,8 +75,7 @@ func (s *ProxyHandler) HandleTunnel(wr http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func (s *ProxyHandler) HandleRequest(wr http.ResponseWriter, req *http.Request) {
-	clientPair := s.getRandomDialerClient()
+func (s *ProxyHandler) HandleRequest(wr http.ResponseWriter, req *http.Request, clientPair DialerClientPair) {
 	httpTransport := &http.Transport{
 		DialContext: clientPair.Dialer.DialContext,
 	}
@@ -102,7 +103,55 @@ func (s *ProxyHandler) HandleRequest(wr http.ResponseWriter, req *http.Request) 
 }
 
 func (s *ProxyHandler) ServeHTTP(wr http.ResponseWriter, req *http.Request) {
-	s.logger.Info("Request: %v %v %v %v", req.RemoteAddr, req.Proto, req.Method, req.URL)
+	authHeader := req.Header.Get("Proxy-Authorization")
+	if authHeader == "" {
+		s.logger.Info("Unauthorized")
+		wr.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
+		http.Error(wr, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	authParts := strings.SplitN(authHeader, " ", 2)
+	if len(authParts) != 2 || authParts[0] != "Basic" {
+		s.logger.Info("Invalid Authorization header")
+		http.Error(wr, "Invalid Authorization header", http.StatusUnauthorized)
+		return
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(authParts[1])
+	if err != nil {
+		s.logger.Info("Invalid Base64 encoding")
+		http.Error(wr, "Invalid Base64 encoding", http.StatusUnauthorized)
+		return
+	}
+
+	credentials := strings.SplitN(string(decoded), ":", 2)
+	if len(credentials) != 2 {
+		s.logger.Info("Invalid credentials format")
+		http.Error(wr, "Invalid credentials format", http.StatusUnauthorized)
+		return
+	}
+
+	username, password := credentials[0], credentials[1]
+	s.logger.Info("Username: %s, Password: %s", username, password)
+
+	var clientPair *DialerClientPair
+	s.mu.Lock()
+	for i := range s.dialerClients {
+		if s.dialerClients[i].Username == username && s.dialerClients[i].Password == password {
+			clientPair = &s.dialerClients[i]
+			break
+		}
+	}
+	s.mu.Unlock()
+
+	if clientPair == nil {
+		s.logger.Info("Authentication failed for user: %s", username)
+		http.Error(wr, "Invalid username or password", http.StatusUnauthorized)
+		return
+	}
+
+	s.logger.Info("Authentication successful for user: %s", username)
 
 	isConnect := strings.ToUpper(req.Method) == "CONNECT"
 	if (req.URL.Host == "" || req.URL.Scheme == "" && !isConnect) && req.ProtoMajor < 2 ||
@@ -112,8 +161,8 @@ func (s *ProxyHandler) ServeHTTP(wr http.ResponseWriter, req *http.Request) {
 	}
 	delHopHeaders(req.Header)
 	if isConnect {
-		s.HandleTunnel(wr, req)
+		s.HandleTunnel(wr, req, *clientPair)
 	} else {
-		s.HandleRequest(wr, req)
+		s.HandleRequest(wr, req, *clientPair)
 	}
 }
