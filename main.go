@@ -276,6 +276,8 @@ func run() int {
 		dialerClients = append(dialerClients, DialerClientPair{
 			Dialer:    handlerDialer,
 			WndClient: wndc,
+			Username:  fmt.Sprintf("admin-%d", i),
+			Password:  "bX3dTH0tl75e",
 		})
 		mainLogger.Info("Endpoint: %s", proxyNetAddr)
 		mainLogger.Info("Starting proxy server...")
@@ -283,6 +285,7 @@ func run() int {
 
 	handler := NewProxyHandler(dialerClients, proxyLogger)
 	mainLogger.Info("Init complete.")
+
 	err = http.ListenAndServe(args.bindAddress, handler)
 	mainLogger.Critical("Server terminated with a reason: %v", err)
 	mainLogger.Info("Shutting down...")
