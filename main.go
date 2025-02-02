@@ -135,8 +135,9 @@ func run() int {
 
 	mainLogger.Info("windscribe-proxy client version %s is starting...", version)
 
+	selectedServers := make(map[string]struct{})
 	var dialerClients []DialerClientPair
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 350; i++ {
 		var dialer ContextDialer = &net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
@@ -222,18 +223,18 @@ func run() int {
 		}
 
 		var serverList wndclient.ServerList
-		if args.listProxies || args.listLocations || args.location != "" {
-			err := try("retrieve server list", func() error {
-				ctx, cl := context.WithTimeout(context.Background(), args.timeout)
-				defer cl()
-				l, err := wndc.ServerList(ctx)
-				serverList = l
-				return err
-			})
-			if err != nil {
-				return 12
-			}
+		//if args.listProxies || args.listLocations || args.location != "" {
+		err = try("retrieve server list", func() error {
+			ctx, cl := context.WithTimeout(context.Background(), args.timeout)
+			defer cl()
+			l, err := wndc.ServerList(ctx)
+			serverList = l
+			return err
+		})
+		if err != nil {
+			return 12
 		}
+		//}
 
 		if args.listProxies {
 			username, password := wndc.GetProxyCredentials()
@@ -245,26 +246,12 @@ func run() int {
 		}
 
 		var proxyHostname string
-		if args.location == "" {
-			err := try("find best location", func() error {
-				ctx, cl := context.WithTimeout(context.Background(), args.timeout)
-				defer cl()
-				bestLocation, err := wndc.BestLocation(ctx)
-				if err == nil {
-					proxyHostname = bestLocation.Hostname
-				}
-				return err
-			})
-			if err != nil {
-				return 13
-			}
-		} else {
-			proxyHostname = pickServer(serverList, args.location)
-			if proxyHostname == "" {
-				mainLogger.Critical("Server for location \"%s\" not found.", args.location)
-				return 13
-			}
+		proxyHostname = pickServer(serverList, args.location, selectedServers)
+		if proxyHostname == "" {
+			mainLogger.Critical("Server for location \"%s\" not found.", args.location)
+			return 13
 		}
+		selectedServers[proxyHostname] = struct{}{}
 
 		auth := func() string {
 			return basic_auth_header(wndc.GetProxyCredentials())
@@ -281,6 +268,8 @@ func run() int {
 		})
 		mainLogger.Info("Endpoint: %s", proxyNetAddr)
 		mainLogger.Info("Starting proxy server...")
+
+		time.Sleep(5 * time.Second)
 	}
 
 	handler := NewProxyHandler(dialerClients, proxyLogger)
@@ -352,12 +341,13 @@ func printProxies(username, password string, serverList wndclient.ServerList) in
 	return 0
 }
 
-func pickServer(serverList wndclient.ServerList, location string) string {
+func pickServer(serverList wndclient.ServerList, location string, selectedServers map[string]struct{}) string {
 	var candidates []string
+
 	for _, country := range serverList {
 		for _, group := range country.Groups {
 			for _, host := range group.Hosts {
-				if country.Name+"/"+group.City == location {
+				if _, exists := selectedServers[host.Hostname]; !exists {
 					candidates = append(candidates, host.Hostname)
 				}
 			}
