@@ -120,7 +120,13 @@ func run() int {
 		return 0
 	}
 
-	logWriter := NewLogWriter(os.Stderr)
+	logFile, err := os.OpenFile("app.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		log.Fatalf("Failed to open log file: %v", err)
+	}
+	defer logFile.Close()
+
+	logWriter := NewLogWriter(os.Stderr) // NewLogWriter(logFile)
 	defer logWriter.Close()
 
 	mainLogger := NewCondLogger(log.New(logWriter, "MAIN    : ",
@@ -266,7 +272,8 @@ func run() int {
 			Username:  fmt.Sprintf("admin-%d", i),
 			Password:  "bX3dTH0tl75e",
 		})
-		mainLogger.Info("Endpoint: %s", proxyNetAddr)
+		username := fmt.Sprintf("admin-%d", i)
+		mainLogger.Info("Endpoint: %s %s %s", proxyNetAddr, proxyHostname, username)
 		mainLogger.Info("Starting proxy server...")
 
 		time.Sleep(5 * time.Second)
